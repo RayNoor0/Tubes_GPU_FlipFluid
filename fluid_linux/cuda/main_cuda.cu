@@ -438,7 +438,7 @@ static void runBenchmark(AppWindow& w) {
         for (int ri = 0; ri < NRES; ++ri) std::printf("%-11d", v[ri]);
         std::printf("\n");
     };
-    std::printf("%-16s", "FPS(1000/Ttot)");
+    std::printf("%-16s", "FPS");
     for (int ri = 0; ri < NRES; ++ri) {
         double t = avg[ri][fliptiming::T_total];
         std::printf("%-11.1f", t > 0.0 ? 1000.0 / t : 0.0);

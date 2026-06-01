@@ -1,0 +1,27 @@
+[flip-cpp] starting (CPU sim, GPU render)
+[flip-cpp] benchmark: 60 warmup + 600 measured frames/resolution, vsync off
+  res=50  particles=4189    pressIters=50  subSteps=1 ... done
+  res=100 particles=18352   pressIters=50  subSteps=1 ... done
+  res=150 particles=42300   pressIters=75  subSteps=3 ... done
+  res=200 particles=76104   pressIters=100 subSteps=4 ... done
+
+=== [CPU] FLIP per-stage benchmark (avg ms/frame) ===
+warmup=60, measure=600 frames, vsync OFF, UI overlay excluded from T9
+config: gravity ON, separateParticles ON, compensateDrift ON, flipRatio=0.90, obstacle static @ (3.0,2.0)
+
+Stage           res=50      res=100     res=150     res=200     
+T1_integrate    0.0060     0.0412     0.0536     0.0973     
+T2_pushApart    0.8273     3.8638     27.1076    65.3851    
+T3_collisions   0.0085     0.0339     0.2338     0.5069     
+T4_p2g          0.1227     0.4943     3.4636     8.1423     
+T5_density      0.0270     0.1158     0.7995     1.8964     
+T6_pressure     0.6245     2.6686     28.0235    89.3890    
+T7_g2p          0.0865     0.3770     2.6437     6.2982     
+T8_colors       0.0344     0.1346     0.2863     0.4965     
+T9_render       3.7428     12.9274    23.8460    31.6972    
+T10_transfer    0.0000     0.0000     0.0000     0.0000     
+T_total         5.4802     20.6573    86.4592    203.9105   
+FPS             182.5      48.4       11.6       4.9        
+particles       4189       18352      42300      76104      
+pressIters      50         50         75         100        
+subSteps        1          1          3          4          

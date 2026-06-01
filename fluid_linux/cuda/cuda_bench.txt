@@ -1,0 +1,36 @@
+[flip-cuda] starting (GPU sim, CUDA-GL interop render)
+[flip-cuda] CUDA-GL interop: DISABLED -> device->host copy (T10_d2h) [expected on WSL2]
+[flip-cuda] GPU: NVIDIA GeForce RTX 5050 Laptop GPU | compute capability 12.0 | 8.0 GiB VRAM | SMs=20
+[flip-cuda] mem: 12001 MHz x 128-bit -> 384.0 GB/s peak (from device attrs)
+[flip-cuda] CUDA driver 13.2, runtime 13.0
+[flip-cuda] benchmark: 60 warmup + 600 measured frames/resolution, vsync off
+[flip-cuda] CUDA-GL interop: DISABLED -> device->host copy (T10_d2h) [expected on WSL2]
+  res=50  particles=4189    pressIters=50  subSteps=1 ... done
+[flip-cuda] CUDA-GL interop: DISABLED -> device->host copy (T10_d2h) [expected on WSL2]
+  res=100 particles=18352   pressIters=50  subSteps=1 ... done
+[flip-cuda] CUDA-GL interop: DISABLED -> device->host copy (T10_d2h) [expected on WSL2]
+  res=150 particles=42300   pressIters=75  subSteps=3 ... done
+[flip-cuda] CUDA-GL interop: DISABLED -> device->host copy (T10_d2h) [expected on WSL2]
+  res=200 particles=76104   pressIters=100 subSteps=4 ... done
+
+=== [CUDA] FLIP per-stage benchmark (avg ms/frame) ===
+warmup=60, measure=600 frames, vsync OFF, UI overlay excluded from T9
+render path: no-interop device->host copy (T10 = D2H copy)
+config: gravity ON, separateParticles ON, compensateDrift ON, flipRatio=0.90, obstacle static @ (3.0,2.0); pressure = red-black GS
+
+Stage           res=50      res=100     res=150     res=200     
+T1_integrate    0.1960     0.5682     0.8083     0.6379     
+T2_pushApart    0.1796     0.2342     0.7075     1.1891     
+T3_collisions   0.0380     0.0404     0.0295     0.0300     
+T4_p2g          0.1043     0.0994     0.3185     0.4498     
+T5_density      0.0378     0.0489     0.1210     0.1624     
+T6_pressure     1.1490     1.1459     4.7101     9.2152     
+T7_g2p          0.0341     0.0345     0.1048     0.1844     
+T8_colors       0.0332     0.0297     0.0315     0.0457     
+T9_render       3.0832     12.0728    21.8693    37.9822    
+T10_transfer    0.1162     0.2147     0.3988     0.8497     
+T_total         5.1959     14.8307    29.5857    51.3875    
+FPS             192.5      67.4       33.8       19.5       
+particles       4189       18352      42300      76104      
+pressIters      50         50         75         100        
+subSteps        1          1          3          4          
