@@ -290,14 +290,117 @@ static void drawObstacle(const FlipFluid& f, float ox, float oy, float orad) {
     glEnd();
 }
 
+// --------------------------- benchmark --------------------------------------
+static void runBenchmark(AppWindow& w) {
+    static const int resList[] = {50, 100, 150, 200};
+    const int NRES = (int)(sizeof(resList) / sizeof(resList[0]));
+    const int WARMUP = 60, MEASURE = 600;
+
+    double avg[4][fliptiming::STAGE_COUNT] = {};
+    int parts[4] = {}, pIters[4] = {}, subs[4] = {};
+
+    auto now = []{ return std::chrono::steady_clock::now(); };
+    auto ms  = [](std::chrono::steady_clock::time_point a,
+                  std::chrono::steady_clock::time_point b) {
+        return std::chrono::duration<double, std::milli>(b - a).count();
+    };
+
+    std::printf("[flip-cpp] benchmark: %d warmup + %d measured frames/resolution, vsync off\n",
+                WARMUP, MEASURE);
+
+    for (int ri = 0; ri < NRES && w.running; ++ri) {
+        scene.resolution = resList[ri];
+        setupScene();               // also re-seeds the static obstacle at (3,2)
+        scene.paused = false;
+        FlipFluid& f = *scene.fluid;
+        parts[ri] = f.numParticles; pIters[ri] = scene.numPressureIters;
+        subs[ri]  = scene.numSubSteps;
+        std::printf("  res=%-3d particles=%-7d pressIters=%-3d subSteps=%d ... ",
+                    resList[ri], parts[ri], pIters[ri], subs[ri]);
+        std::fflush(stdout);
+
+        for (int frame = 0; frame < WARMUP + MEASURE && w.running; ++frame) {
+            while (XPending(w.dpy) > 0) {  // stay responsive; honor close/quit
+                XEvent e; XNextEvent(w.dpy, &e);
+                if (e.type == ClientMessage &&
+                    (Atom)e.xclient.data.l[0] == w.wm_delete) w.running = false;
+                else if (e.type == ConfigureNotify) {
+                    w.width = e.xconfigure.width; w.height = e.xconfigure.height;
+                } else if (e.type == KeyPress) {
+                    KeySym ks = XLookupKeysym(&e.xkey, 0);
+                    if (ks == XK_q || ks == XK_Q || ks == XK_Escape) w.running = false;
+                }
+            }
+
+            auto t0 = now();
+            f.simulate(scene.dt, scene.gravity, scene.flipRatio,
+                       scene.numPressureIters, scene.numParticleIters,
+                       scene.overRelaxation, scene.compensateDrift,
+                       scene.separateParticles,
+                       scene.obstacleX, scene.obstacleY, scene.obstacleRadius,
+                       scene.obstacleVelX, scene.obstacleVelY, scene.numSubSteps);
+            auto tr = now();
+            glClear(GL_COLOR_BUFFER_BIT);
+            setProjection(w.width, w.height);
+            if (scene.showGrid)      drawGrid(f);
+            if (scene.showParticles) drawParticles(f, w.height);
+            if (scene.showObstacle)  drawObstacle(f, scene.obstacleX, scene.obstacleY,
+                                                  scene.obstacleRadius);
+            glXSwapBuffers(w.dpy, w.xwin);
+            auto te = now();
+
+            fliptiming::stageAdd(f.timing, fliptiming::T9_render, ms(tr, te));
+            fliptiming::stageAdd(f.timing, fliptiming::T_total,   ms(t0, te));
+            if (frame == WARMUP - 1)   // discard warmup
+                for (int s = 0; s < fliptiming::STAGE_COUNT; ++s) f.timing.sumMs[s] = 0.0;
+        }
+        for (int s = 0; s < fliptiming::STAGE_COUNT; ++s)
+            avg[ri][s] = f.timing.sumMs[s] / MEASURE;
+        std::printf("done\n");
+    }
+
+    std::printf("\n=== [CPU] FLIP per-stage benchmark (avg ms/frame) ===\n");
+    std::printf("warmup=%d, measure=%d frames, vsync OFF, UI overlay excluded from T9\n",
+                WARMUP, MEASURE);
+    std::printf("config: gravity ON, separateParticles ON, compensateDrift ON, "
+                "flipRatio=%.2f, obstacle static @ (%.1f,%.1f)\n\n",
+                scene.flipRatio, scene.obstacleX, scene.obstacleY);
+    std::printf("%-16s", "Stage");
+    for (int ri = 0; ri < NRES; ++ri) std::printf("res=%-8d", resList[ri]);
+    std::printf("\n");
+    for (int s = 0; s < fliptiming::STAGE_COUNT; ++s) {
+        std::printf("%-16s", fliptiming::stageName(s));
+        for (int ri = 0; ri < NRES; ++ri) std::printf("%-11.4f", avg[ri][s]);
+        std::printf("\n");
+    }
+    auto rowI = [&](const char* label, const int* v) {
+        std::printf("%-16s", label);
+        for (int ri = 0; ri < NRES; ++ri) std::printf("%-11d", v[ri]);
+        std::printf("\n");
+    };
+    std::printf("%-16s", "FPS");
+    for (int ri = 0; ri < NRES; ++ri) {
+        double t = avg[ri][fliptiming::T_total];
+        std::printf("%-11.1f", t > 0.0 ? 1000.0 / t : 0.0);
+    }
+    std::printf("\n");
+    rowI("particles", parts);
+    rowI("pressIters", pIters);
+    rowI("subSteps", subs);
+    std::fflush(stdout);
+}
+
 // --------------------------- main -------------------------------------------
 
 int main(int argc, char** argv) {
     bool noVsync = false;
+    bool bench   = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--no-vsync") == 0) noVsync = true;
+        else if (std::strcmp(argv[i], "--bench") == 0) { bench = true; noVsync = true; }
         else if (std::strcmp(argv[i], "-h") == 0 || std::strcmp(argv[i], "--help") == 0) {
-            std::printf("Usage: %s [--no-vsync]\n", argv[0]);
+            std::printf("Usage: %s [--no-vsync] [--bench]\n", argv[0]);
+            std::printf("  --bench   run the per-stage benchmark (res 50/100/150/200) and exit\n");
             std::printf("Controls: LMB=move obstacle, SPACE/P=pause, G=grid, R=reset, Q/Esc=quit\n");
             return 0;
         }
@@ -316,6 +419,13 @@ int main(int argc, char** argv) {
         auto pfn = (PFNGLXSWAPINTERVAL)glXGetProcAddressARB(
             (const GLubyte*)"glXSwapIntervalMESA");
         if (pfn) pfn(0);
+    }
+
+    if (bench) {
+        runBenchmark(w);
+        destroyWindow(w);
+        delete scene.fluid;
+        return 0;
     }
 
     bool mouseDownPrev = false;        // sim-side latch (obstacle drag)
