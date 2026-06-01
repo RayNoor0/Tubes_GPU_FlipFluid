@@ -5,6 +5,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "stage_timing.h"
+
 namespace flipcpu {
 
 constexpr int U_FIELD = 0;
@@ -47,6 +49,9 @@ public:
     std::vector<int> cellParticleIds;     // maxParticles
 
     int  numParticles = 0;
+
+    // Per-stage timing accumulator (filled inside simulate(); T9/T10/T_total are reported every 60 frames in main.cpp).
+    fliptiming::StageStats timing;
 
     FlipFluid(float density, float width, float height,
               float spacing, float particle_radius, int max_particles);

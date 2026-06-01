@@ -12,7 +12,7 @@ all: $(BIN)
 $(BIN): $(OBJ)
 	$(CXX) $(LDFLAGS) -o $@ $^ $(LIBS)
 
-%.o: %.cpp flip_fluid.h ui.h
+%.o: %.cpp flip_fluid.h ui.h stage_timing.h
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 clean:

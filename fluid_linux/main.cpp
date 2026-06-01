@@ -333,6 +333,7 @@ int main(int argc, char** argv) {
     bool gravityOn = (scene.gravity != 0.0f);
 
     while (w.running) {
+        auto frameStart = std::chrono::steady_clock::now();
         mousePressedEdge = false;
         mouseReleasedEdge = false;
 
@@ -427,7 +428,8 @@ int main(int argc, char** argv) {
             if (scene.frameNr == 0) f.updateCellColors();
         }
 
-        // ----- draw sim -----
+        // ----- draw sim ----- (T9_render: draw + UI overlay + buffer swap)
+        auto renderStart = std::chrono::steady_clock::now();
         glClear(GL_COLOR_BUFFER_BIT);
         setProjection(w.width, w.height);
 
@@ -480,17 +482,25 @@ int main(int argc, char** argv) {
 
         glXSwapBuffers(w.dpy, w.xwin);
 
+        // ----- per-stage timing: T9_render, T_total, and 60-frame report -----
+        auto frameEnd = std::chrono::steady_clock::now();
+        auto msSince = [](std::chrono::steady_clock::time_point a,
+                          std::chrono::steady_clock::time_point b) {
+            return std::chrono::duration<double, std::milli>(b - a).count();
+        };
+        fliptiming::stageAdd(f.timing, fliptiming::T9_render,
+                             msSince(renderStart, frameEnd));
+        fliptiming::stageAdd(f.timing, fliptiming::T_total,
+                             msSince(frameStart, frameEnd));
+        fliptiming::stageReportEvery(f.timing, 60, "CPU");
+
         // ----- fps -----
         fpsFrames += 1;
-        auto now = std::chrono::steady_clock::now();
-        double elapsed = std::chrono::duration<double>(now - fpsT0).count();
+        double elapsed = std::chrono::duration<double>(frameEnd - fpsT0).count();
         if (elapsed >= 0.5) {
             lastFps = fpsFrames / elapsed;
             std::snprintf(fpsStr, sizeof(fpsStr), "%.1f", lastFps);
-            std::printf("[flip-cpp] %s FPS  particles=%d frame=%ld\n",
-                        fpsStr, f.numParticles, scene.frameNr);
-            std::fflush(stdout);
-            fpsT0 = now;
+            fpsT0 = frameEnd;
             fpsFrames = 0;
         }
     }

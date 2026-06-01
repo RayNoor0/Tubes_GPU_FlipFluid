@@ -3,6 +3,7 @@
 #include "flip_fluid.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 
 namespace flipcpu {
@@ -543,23 +544,49 @@ void FlipFluid::simulate(float dt, float gravity, float flipRatio,
                          float obstacleVelX, float obstacleVelY,
                          int numSubSteps)
 {
+    // Per-stage timing. Stages T1..T7 run once per sub-step and accumulate across sub-steps, while T8 runs once per frame.
+    using Clock = std::chrono::steady_clock;
+    auto now = []{ return Clock::now(); };
+    auto ms  = [](Clock::time_point a, Clock::time_point b) {
+        return std::chrono::duration<double, std::milli>(b - a).count();
+    };
+
     if (numSubSteps < 1) numSubSteps = 1;
     float sdt = dt / numSubSteps;
     for (int step = 0; step < numSubSteps; ++step) {
+        auto t0 = now();
         integrateParticles(sdt, gravity);
+        auto t1 = now(); stageAdd(timing, fliptiming::T1_integrate, ms(t0, t1));
+
         if (separateParticles)
             pushParticlesApart(numParticleIters);
+        auto t2 = now(); stageAdd(timing, fliptiming::T2_pushApart, ms(t1, t2));
+
         handleParticleCollisions(obstacleX, obstacleY, obstacleRadius,
                                  obstacleVelX, obstacleVelY);
+        auto t3 = now(); stageAdd(timing, fliptiming::T3_collisions, ms(t2, t3));
+
         transferVelocities(true);
+        auto t4 = now(); stageAdd(timing, fliptiming::T4_p2g, ms(t3, t4));
+
         updateParticleDensity();
         if (particleRestDensity == 0.0f)
             particleRestDensity = computeRestDensity();
+        auto t5 = now(); stageAdd(timing, fliptiming::T5_density, ms(t4, t5));
+
         solveIncompressibility(numPressureIters, sdt, overRelaxation, compensateDrift);
+        auto t6 = now(); stageAdd(timing, fliptiming::T6_pressure, ms(t5, t6));
+
         transferVelocities(false, flipRatio);
+        auto t7 = now(); stageAdd(timing, fliptiming::T7_g2p, ms(t6, t7));
     }
+
+    auto t8a = now();
     updateParticleColors();
     updateCellColors();
+    auto t8b = now(); stageAdd(timing, fliptiming::T8_colors, ms(t8a, t8b));
+
+    stageSetIters(timing, numPressureIters);
 }
 
 } // namespace flipcpu
