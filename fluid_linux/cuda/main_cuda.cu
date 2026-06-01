@@ -1,20 +1,22 @@
-// Window + renderer + main loop for the C++ FLIP demo.
-// Simulation runs on the CPU; only rendering is delegated to the GPU via
-// legacy OpenGL (point sprites + line-strip circle for the obstacle).
+// Window + renderer + main loop for the CUDA FLIP demo.
+// The simulation runs on the GPU (flipcuda::FlipFluidCuda). Particle positions and
+// colors live in OpenGL VBOs that CUDA maps each frame and writes directly (bonus
+// B1 interop) — there is no device->host copy on the render path. Per-stage timing
+// (T1..T10, T_total) prints every 60 frames, matching the CPU build's format.
 //
-// Inputs:
+// Inputs (identical to the CPU demo):
 //   left mouse drag   move/release the obstacle
 //   SPACE / P         pause-resume
 //   G                 toggle grid
 //   R                 reset scene
 //   Q / Esc           quit
 
-#include "flip_fluid.h"
-#include "ui.h"
+#include "flip_fluid_cuda.cuh"
+#include "../ui.h"
 
+#include <GL/glext.h>
 #include <X11/Xlib.h>
 #include <X11/keysym.h>
-#include <GL/gl.h>
 #include <GL/glx.h>
 
 #include <chrono>
@@ -24,7 +26,7 @@
 #include <cstring>
 #include <vector>
 
-using namespace flipcpu;
+using namespace flipcuda;
 
 // --------------------------- scene / config ---------------------------------
 struct Scene {
@@ -46,9 +48,9 @@ struct Scene {
     float obstacleVelY    = 0.0f;
     bool  showParticles   = true;
     bool  showGrid        = false;
-    int   resolution      = 100;   // grid cells along the tank height
-    int   numSubSteps     = 1;     // CFL substeps — auto-scaled with res
-    FlipFluid* fluid      = nullptr;
+    int   resolution      = 100;
+    int   numSubSteps     = 1;
+    FlipFluidCuda* fluid  = nullptr;
 };
 
 static Scene scene;
@@ -59,27 +61,27 @@ constexpr float simHeight = 3.0f;
 constexpr float cScale = float(CANVAS_H) / simHeight;
 constexpr float simWidth = float(CANVAS_W) / cScale;
 
-// --------------------------- scene helpers ----------------------------------
-static void carveObstacle(FlipFluid& f, float x, float y, float r,
-                          float vx, float vy)
-{
-    int n = f.fNumY;
-    for (int i = 1; i < f.fNumX - 2; ++i) {
-        for (int j = 1; j < f.fNumY - 2; ++j) {
-            f.s[i * n + j] = 1.0f;
-            float dx = (i + 0.5f) * f.h - x;
-            float dy = (j + 0.5f) * f.h - y;
-            if (dx * dx + dy * dy < r * r) {
-                f.s[i * n + j] = 0.0f;
-                f.u[i * n + j]       = vx;
-                f.u[(i + 1) * n + j] = vx;
-                f.v[i * n + j]       = vy;
-                f.v[i * n + j + 1]   = vy;
-            }
-        }
+// --------------------------- GL VBO function pointers ------------------------
+static PFNGLGENBUFFERSPROC    pglGenBuffers    = nullptr;
+static PFNGLBINDBUFFERPROC    pglBindBuffer    = nullptr;
+static PFNGLBUFFERDATAPROC    pglBufferData    = nullptr;
+static PFNGLDELETEBUFFERSPROC pglDeleteBuffers = nullptr;
+
+static void loadGLBuffers() {
+    pglGenBuffers    = (PFNGLGENBUFFERSPROC)    glXGetProcAddressARB((const GLubyte*)"glGenBuffers");
+    pglBindBuffer    = (PFNGLBINDBUFFERPROC)    glXGetProcAddressARB((const GLubyte*)"glBindBuffer");
+    pglBufferData    = (PFNGLBUFFERDATAPROC)    glXGetProcAddressARB((const GLubyte*)"glBufferData");
+    pglDeleteBuffers = (PFNGLDELETEBUFFERSPROC) glXGetProcAddressARB((const GLubyte*)"glDeleteBuffers");
+    if (!pglGenBuffers || !pglBindBuffer || !pglBufferData || !pglDeleteBuffers) {
+        std::fprintf(stderr, "Failed to load GL VBO functions (need GL >= 1.5)\n");
+        std::exit(1);
     }
 }
 
+static GLuint g_posVBO = 0;   // float2 per particle (interop)
+static GLuint g_colVBO = 0;   // float3 per particle (interop)
+
+// --------------------------- scene helpers ----------------------------------
 static void setObstacle(float x, float y, bool reset) {
     float vx = 0.0f, vy = 0.0f;
     if (!reset) {
@@ -88,61 +90,61 @@ static void setObstacle(float x, float y, bool reset) {
     }
     scene.obstacleX = x;
     scene.obstacleY = y;
-    carveObstacle(*scene.fluid, x, y, scene.obstacleRadius, vx, vy);
+    scene.fluid->carveObstacle(x, y, scene.obstacleRadius, vx, vy);
     scene.showObstacle  = true;
     scene.obstacleVelX  = vx;
     scene.obstacleVelY  = vy;
 }
 
-static void seedParticles(FlipFluid& f, int numX, int numY,
-                          float h, float r, float dx, float dy)
-{
+// Mirror of the CPU seedParticles, producing interleaved host arrays for upload.
+static void seedParticles(std::vector<float>& posXY, std::vector<float>& colRGB,
+                          int numX, int numY, float h, float r, float dx, float dy) {
     for (int i = 0; i < numX; ++i) {
         for (int j = 0; j < numY; ++j) {
             int pid = i * numY + j;
             float offset = (j % 2 == 0) ? 0.0f : r;
-            f.particlePosX[pid] = h + r + dx * i + offset;
-            f.particlePosY[pid] = h + r + dy * j;
+            posXY[2 * pid + 0] = h + r + dx * i + offset;
+            posXY[2 * pid + 1] = h + r + dy * j;
+            colRGB[3 * pid + 0] = 0.0f;
+            colRGB[3 * pid + 1] = 0.0f;
+            colRGB[3 * pid + 2] = 1.0f;
         }
     }
 }
 
-static void setupTank(FlipFluid& f) {
-    int n = f.fNumY;
-    for (int i = 0; i < f.fNumX; ++i) {
-        for (int j = 0; j < f.fNumY; ++j) {
+static void setupTank(std::vector<float>& s, int fNumX, int fNumY) {
+    int n = fNumY;
+    for (int i = 0; i < fNumX; ++i)
+        for (int j = 0; j < fNumY; ++j) {
             float sVal = 1.0f;
-            if (i == 0 || i == f.fNumX - 1 || j == 0) sVal = 0.0f;
-            f.s[i * n + j] = sVal;
+            if (i == 0 || i == fNumX - 1 || j == 0) sVal = 0.0f;
+            s[i * n + j] = sVal;
         }
-    }
 }
 
 static void setupScene() {
     scene.obstacleRadius   = 0.15f;
+    // Pressure solver is red-black Gauss-Seidel (see solvePressure) — stable at the
+    // CPU's SOR factor, so we keep overRelaxation = 1.9 and numPressureIters identical
+    // to the CPU for an apples-to-apples comparison (only update ordering differs).
     scene.overRelaxation   = 1.9f;
     scene.dt               = 1.0f / 60.0f;
     scene.numParticleIters = 2;
 
-    int   res         = scene.resolution;
-
-    // Stability auto-scaling. At higher resolution the cell size h shrinks,
-    // so a fixed dt violates CFL and the pressure Poisson takes more
-    // Gauss-Seidel sweeps to propagate across the finer grid. Both knobs
-    // scale with res; numbers picked to keep res=100 identical to before.
+    int res = scene.resolution;
     if      (res <= 100) scene.numSubSteps = 1;
     else if (res <= 140) scene.numSubSteps = 2;
     else if (res <= 180) scene.numSubSteps = 3;
     else                 scene.numSubSteps = 4;
     scene.numPressureIters = 50 + std::max(0, (res - 100)) / 2;
-    float tankHeight  = 1.0f * simHeight;
-    float tankWidth   = 1.0f * simWidth;
-    float h           = tankHeight / res;
-    float density     = 1000.0f;
+
+    float tankHeight = 1.0f * simHeight;
+    float tankWidth  = 1.0f * simWidth;
+    float h          = tankHeight / res;
+    float density    = 1000.0f;
 
     float relWaterHeight = 0.8f;
     float relWaterWidth  = 0.6f;
-
     float r  = 0.3f * h;
     float dx = 2.0f * r;
     float dy = std::sqrt(3.0f) / 2.0f * dx;
@@ -153,24 +155,48 @@ static void setupScene() {
     if (numY < 1) numY = 1;
     int maxParticles = numX * numY;
 
-    // Always (re)allocate so a change to scene.resolution actually changes the
-    // grid dimensions. Pointers into scene.fluid become invalid; callers must
-    // re-fetch the reference after setupScene().
+    // Tear down the previous fluid first so its CUDA resources are unregistered
+    // before the underlying VBOs are deleted.
     delete scene.fluid;
-    scene.fluid = new FlipFluid(density, tankWidth, tankHeight, h, r, maxParticles);
+    scene.fluid = nullptr;
 
-    FlipFluid& f = *scene.fluid;
+    // (Re)create the interop VBOs sized for this resolution.
+    if (g_posVBO) pglDeleteBuffers(1, &g_posVBO);
+    if (g_colVBO) pglDeleteBuffers(1, &g_colVBO);
+    pglGenBuffers(1, &g_posVBO);
+    pglGenBuffers(1, &g_colVBO);
+
+    std::vector<float> hostPos(2 * maxParticles, 0.0f);
+    std::vector<float> hostCol(3 * maxParticles, 0.0f);
+    seedParticles(hostPos, hostCol, numX, numY, h, r, dx, dy);
+
+    pglBindBuffer(GL_ARRAY_BUFFER, g_posVBO);
+    pglBufferData(GL_ARRAY_BUFFER, hostPos.size() * sizeof(float),
+                  hostPos.data(), GL_DYNAMIC_DRAW);
+    pglBindBuffer(GL_ARRAY_BUFFER, g_colVBO);
+    pglBufferData(GL_ARRAY_BUFFER, hostCol.size() * sizeof(float),
+                  hostCol.data(), GL_DYNAMIC_DRAW);
+    pglBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    scene.fluid = new FlipFluidCuda(density, tankWidth, tankHeight, h, r, maxParticles);
+    FlipFluidCuda& f = *scene.fluid;
     f.numParticles = numX * numY;
-    f.particleRestDensity = 0.0f;
+    f.uploadParticles(hostPos, hostCol);
+    bool interop = f.tryRegisterVBOs(g_posVBO, g_colVBO);
+    std::printf("[flip-cuda] CUDA-GL interop: %s\n",
+                interop ? "ENABLED (B1, kernels write VBO directly)"
+                        : "DISABLED -> device->host copy (T10_d2h) [expected on WSL2]");
 
-    seedParticles(f, numX, numY, h, r, dx, dy);
-    setupTank(f);
+    std::vector<float> s(f.fNumCells, 0.0f);
+    setupTank(s, f.fNumX, f.fNumY);
+    f.uploadSolid(s);
+
     setObstacle(3.0f, 2.0f, true);
+    f.updateCellColorsOnce();
     scene.frameNr = 0;
 }
 
 // --------------------------- X11 + GLX --------------------------------------
-
 static int s_glxAttrs[] = {
     GLX_RGBA, GLX_DOUBLEBUFFER, GLX_DEPTH_SIZE, 24,
     GLX_RED_SIZE, 8, GLX_GREEN_SIZE, 8, GLX_BLUE_SIZE, 8,
@@ -228,56 +254,66 @@ static void destroyWindow(AppWindow& w) {
 }
 
 // --------------------------- rendering --------------------------------------
-
-// Map sim coords [0, simWidth] x [0, simHeight] onto NDC [-1, 1].
 static void setProjection(int w, int h) {
     glViewport(0, 0, w, h);
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
-    // ortho with y going up
     glOrtho(0.0, simWidth, 0.0, simHeight, -1.0, 1.0);
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
 }
 
-static void drawGrid(const FlipFluid& f) {
-    // Quads, one per cell, colored by f.cellColor.
+// Grid overlay (debug, default off): pulls cellColor back to the host. This is the
+// only device->host copy in the program and is skipped unless the grid is shown.
+static void drawGrid(FlipFluidCuda& f) {
+    static std::vector<float> cc;
+    f.downloadCellColors(cc);
     float h = f.h;
     glBegin(GL_QUADS);
     for (int i = 0; i < f.fNumX; ++i) {
         for (int j = 0; j < f.fNumY; ++j) {
             int idx = i * f.fNumY + j;
-            float r = f.cellColor[3 * idx + 0];
-            float g = f.cellColor[3 * idx + 1];
-            float b = f.cellColor[3 * idx + 2];
-            float x0 = i * h, y0 = j * h;
-            float x1 = x0 + h, y1 = y0 + h;
-            glColor3f(r, g, b);
-            glVertex2f(x0, y0);
-            glVertex2f(x1, y0);
-            glVertex2f(x1, y1);
-            glVertex2f(x0, y1);
+            glColor3f(cc[3 * idx + 0], cc[3 * idx + 1], cc[3 * idx + 2]);
+            float x0 = i * h, y0 = j * h, x1 = x0 + h, y1 = y0 + h;
+            glVertex2f(x0, y0); glVertex2f(x1, y0);
+            glVertex2f(x1, y1); glVertex2f(x0, y1);
         }
     }
     glEnd();
 }
 
-static void drawParticles(const FlipFluid& f, int viewportH) {
-    // Particle radius in sim units → pixels.
+static void drawParticles(FlipFluidCuda& f, int viewportH) {
     float pxPerSimUnit = float(viewportH) / simHeight;
     float diameterPx = 2.0f * f.particleRadius * pxPerSimUnit;
     if (diameterPx < 1.0f) diameterPx = 1.0f;
     glPointSize(diameterPx);
-    glBegin(GL_POINTS);
-    for (int i = 0; i < f.numParticles; ++i) {
-        glColor3f(f.particleColorR[i], f.particleColorG[i], f.particleColorB[i]);
-        glVertex2f(f.particlePosX[i], f.particlePosY[i]);
+
+    if (f.usingInterop()) {
+        // Kernels wrote the VBOs directly (B1) — draw straight from them.
+        pglBindBuffer(GL_ARRAY_BUFFER, g_posVBO);
+        glEnableClientState(GL_VERTEX_ARRAY);
+        glVertexPointer(2, GL_FLOAT, 0, (void*)0);
+        pglBindBuffer(GL_ARRAY_BUFFER, g_colVBO);
+        glEnableClientState(GL_COLOR_ARRAY);
+        glColorPointer(3, GL_FLOAT, 0, (void*)0);
+        glDrawArrays(GL_POINTS, 0, f.numParticles);
+        glDisableClientState(GL_COLOR_ARRAY);
+        glDisableClientState(GL_VERTEX_ARRAY);
+        pglBindBuffer(GL_ARRAY_BUFFER, 0);
+    } else {
+        // No interop: draw from the host arrays filled by the D2H copy in simulate().
+        pglBindBuffer(GL_ARRAY_BUFFER, 0);
+        glEnableClientState(GL_VERTEX_ARRAY);
+        glVertexPointer(2, GL_FLOAT, 0, f.hostPositions().data());
+        glEnableClientState(GL_COLOR_ARRAY);
+        glColorPointer(3, GL_FLOAT, 0, f.hostColors().data());
+        glDrawArrays(GL_POINTS, 0, f.numParticles);
+        glDisableClientState(GL_COLOR_ARRAY);
+        glDisableClientState(GL_VERTEX_ARRAY);
     }
-    glEnd();
 }
 
-static void drawObstacle(const FlipFluid& f, float ox, float oy, float orad) {
-    // Filled red disk via triangle fan; matches the JS demo's appearance.
+static void drawObstacle(FlipFluidCuda& f, float ox, float oy, float orad) {
     const int N = 48;
     float drawR = orad + f.particleRadius;
     glColor3f(1.0f, 0.0f, 0.0f);
@@ -291,7 +327,6 @@ static void drawObstacle(const FlipFluid& f, float ox, float oy, float orad) {
 }
 
 // --------------------------- main -------------------------------------------
-
 int main(int argc, char** argv) {
     bool noVsync = false;
     for (int i = 1; i < argc; ++i) {
@@ -303,14 +338,12 @@ int main(int argc, char** argv) {
         }
     }
 
-    std::printf("[flip-cpp] starting (CPU sim, GPU render)\n");
-    setupScene();
-    scene.paused = true;
+    std::printf("[flip-cuda] starting (GPU sim, CUDA-GL interop render)\n");
 
     AppWindow w;
-    if (!createWindow(w, "FLIP Fluid (C++ CPU sim)")) return 1;
+    if (!createWindow(w, "FLIP Fluid (CUDA)")) return 1;
+    loadGLBuffers();
 
-    // Try to disable vsync via swap interval if requested.
     if (noVsync) {
         typedef int (*PFNGLXSWAPINTERVAL)(int);
         auto pfn = (PFNGLXSWAPINTERVAL)glXGetProcAddressARB(
@@ -318,17 +351,19 @@ int main(int argc, char** argv) {
         if (pfn) pfn(0);
     }
 
-    bool mouseDownPrev = false;        // sim-side latch (obstacle drag)
+    setupScene();
+    scene.paused = true;
+
+    bool mouseDownPrev = false;
     float mouseSimX = 0.0f, mouseSimY = 0.0f;
-    bool mouseDown = false;             // current LMB state
-    int  mousePxX = 0, mousePxY = 0;    // pixel coords, y-down
+    bool mouseDown = false;
+    int  mousePxX = 0, mousePxY = 0;
     bool mousePressedEdge = false;
     bool mouseReleasedEdge = false;
-    bool dragOwnedByUI = false;         // a drag that started on the UI panel
+    bool dragOwnedByUI = false;
 
     auto fpsT0 = std::chrono::steady_clock::now();
     int  fpsFrames = 0;
-    char fpsStr[64] = "...";
     double lastFps = 0.0;
     bool gravityOn = (scene.gravity != 0.0f);
 
@@ -337,7 +372,6 @@ int main(int argc, char** argv) {
         mousePressedEdge = false;
         mouseReleasedEdge = false;
 
-        // ----- pump X events -----
         while (XPending(w.dpy) > 0) {
             XEvent e;
             XNextEvent(w.dpy, &e);
@@ -348,44 +382,27 @@ int main(int argc, char** argv) {
                 w.height = e.xconfigure.height;
             } else if (e.type == KeyPress) {
                 KeySym ks = XLookupKeysym(&e.xkey, 0);
-                if (ks == XK_space || ks == XK_p || ks == XK_P) {
-                    scene.paused = !scene.paused;
-                } else if (ks == XK_g || ks == XK_G) {
-                    scene.showGrid = !scene.showGrid;
-                } else if (ks == XK_r || ks == XK_R) {
-                    setupScene();
-                } else if (ks == XK_q || ks == XK_Q || ks == XK_Escape) {
-                    w.running = false;
-                }
+                if (ks == XK_space || ks == XK_p || ks == XK_P) scene.paused = !scene.paused;
+                else if (ks == XK_g || ks == XK_G) scene.showGrid = !scene.showGrid;
+                else if (ks == XK_r || ks == XK_R) setupScene();
+                else if (ks == XK_q || ks == XK_Q || ks == XK_Escape) w.running = false;
             } else if (e.type == ButtonPress && e.xbutton.button == Button1) {
-                mouseDown = true;
-                mousePressedEdge = true;
-                mousePxX = e.xbutton.x;
-                mousePxY = e.xbutton.y;
+                mouseDown = true; mousePressedEdge = true;
+                mousePxX = e.xbutton.x; mousePxY = e.xbutton.y;
                 mouseSimX = float(e.xbutton.x) / w.width  * simWidth;
                 mouseSimY = (1.0f - float(e.xbutton.y) / w.height) * simHeight;
             } else if (e.type == ButtonRelease && e.xbutton.button == Button1) {
-                mouseDown = false;
-                mouseReleasedEdge = true;
-                mousePxX = e.xbutton.x;
-                mousePxY = e.xbutton.y;
+                mouseDown = false; mouseReleasedEdge = true;
+                mousePxX = e.xbutton.x; mousePxY = e.xbutton.y;
                 mouseSimX = float(e.xbutton.x) / w.width  * simWidth;
                 mouseSimY = (1.0f - float(e.xbutton.y) / w.height) * simHeight;
             } else if (e.type == MotionNotify) {
-                mousePxX = e.xmotion.x;
-                mousePxY = e.xmotion.y;
+                mousePxX = e.xmotion.x; mousePxY = e.xmotion.y;
                 mouseSimX = float(e.xmotion.x) / w.width  * simWidth;
                 mouseSimY = (1.0f - float(e.xmotion.y) / w.height) * simHeight;
             }
         }
 
-        // ----- UI pass (build widget commands; this also issues draws, so we
-        // do it AFTER drawing the sim below, but we need to know whether the
-        // UI captured the mouse BEFORE running sim drag. So we do two passes:
-        //   1) a logic-only pass (no drawing) by inspecting mouse position
-        //   2) the visual pass after the sim.
-        // For simplicity we use a single pass and base "dragOwnedByUI" on the
-        // press edge: if the press started on the panel, the UI owns that drag.
         const int kPanelX = 10, kPanelY = 10, kPanelW = 160, kPanelH = 250;
         bool mouseOnPanel =
             (mousePxX >= kPanelX && mousePxX < kPanelX + kPanelW &&
@@ -393,28 +410,17 @@ int main(int argc, char** argv) {
         if (mousePressedEdge && mouseOnPanel) dragOwnedByUI = true;
         if (!mouseDown) dragOwnedByUI = false;
 
-        // Take a fresh reference each frame: setupScene() may have just
-        // recreated scene.fluid (resolution change or Reset).
-        FlipFluid& f = *scene.fluid;
+        FlipFluidCuda& f = *scene.fluid;
 
-        // ----- obstacle drag (skip if the drag was started over the UI) -----
         if (mouseDown && !dragOwnedByUI) {
-            if (!mouseDownPrev) {
-                setObstacle(mouseSimX, mouseSimY, true);
-                scene.paused = false;
-            } else {
-                setObstacle(mouseSimX, mouseSimY, false);
-            }
+            if (!mouseDownPrev) { setObstacle(mouseSimX, mouseSimY, true); scene.paused = false; }
+            else                  setObstacle(mouseSimX, mouseSimY, false);
             mouseDownPrev = true;
         } else {
-            if (mouseDownPrev) {
-                scene.obstacleVelX = 0.0f;
-                scene.obstacleVelY = 0.0f;
-            }
+            if (mouseDownPrev) { scene.obstacleVelX = 0.0f; scene.obstacleVelY = 0.0f; }
             mouseDownPrev = false;
         }
 
-        // ----- step -----
         if (!scene.paused) {
             f.simulate(scene.dt, scene.gravity, scene.flipRatio,
                        scene.numPressureIters, scene.numParticleIters,
@@ -424,29 +430,22 @@ int main(int argc, char** argv) {
                        scene.obstacleVelX, scene.obstacleVelY,
                        scene.numSubSteps);
             scene.frameNr += 1;
-        } else {
-            if (scene.frameNr == 0) f.updateCellColors();
         }
 
-        // ----- draw sim ----- (T9_render: draw + UI overlay + buffer swap)
+        // ----- draw (T9_render) -----
         auto renderStart = std::chrono::steady_clock::now();
         glClear(GL_COLOR_BUFFER_BIT);
         setProjection(w.width, w.height);
 
         if (scene.showGrid)      drawGrid(f);
         if (scene.showParticles) drawParticles(f, w.height);
-        if (scene.showObstacle)  drawObstacle(f, scene.obstacleX,
-                                              scene.obstacleY,
+        if (scene.showObstacle)  drawObstacle(f, scene.obstacleX, scene.obstacleY,
                                               scene.obstacleRadius);
 
-        // ----- draw UI overlay on top in pixel coords -----
         flipcpu_ui::setProjectionToPixels(w.width, w.height);
-
         flipcpu_ui::Input uin;
-        uin.screenW = w.width;
-        uin.screenH = w.height;
-        uin.mouseX  = mousePxX;
-        uin.mouseY  = mousePxY;
+        uin.screenW = w.width; uin.screenH = w.height;
+        uin.mouseX  = mousePxX; uin.mouseY = mousePxY;
         uin.mouseDown    = mouseDown;
         uin.mousePressed = mousePressedEdge && mouseOnPanel;
         uin.mouseReleased = mouseReleasedEdge;
@@ -454,56 +453,42 @@ int main(int argc, char** argv) {
 
         flipcpu_ui::beginPanel(kPanelX, kPanelY, kPanelW, kPanelH, "Controls");
         flipcpu_ui::text("FPS: %.1f", lastFps);
+        flipcpu_ui::text("Render: %s", f.usingInterop() ? "INTEROP (B1)" : "D2H copy");
         flipcpu_ui::text("Particles: %d", f.numParticles);
         flipcpu_ui::text("Frame: %ld", scene.frameNr);
         flipcpu_ui::checkbox("Particles",          &scene.showParticles);
         flipcpu_ui::checkbox("Grid",               &scene.showGrid);
         flipcpu_ui::checkbox("Compensate Drift",   &scene.compensateDrift);
         flipcpu_ui::checkbox("Separate Particles", &scene.separateParticles);
-        if (flipcpu_ui::checkbox("Gravity", &gravityOn)) {
+        if (flipcpu_ui::checkbox("Gravity", &gravityOn))
             scene.gravity = gravityOn ? -9.81f : 0.0f;
-        }
         flipcpu_ui::slider("PIC <-> FLIP", &scene.flipRatio, 0.0f, 1.0f);
-        // Grid resolution: changes the cell count along the tank height (and
-        // therefore the particle count, since particles are seeded one per
-        // sub-cell). Rebuilds the simulation on every integer step.
         float resFloat = (float)scene.resolution;
         flipcpu_ui::slider("Grid Res", &resFloat, 30.0f, 200.0f);
         int newRes = (int)(resFloat + 0.5f);
-        if (newRes != scene.resolution) {
-            scene.resolution = newRes;
-            setupScene();
-        }
+        if (newRes != scene.resolution) { scene.resolution = newRes; setupScene(); }
         flipcpu_ui::checkbox("Pause", &scene.paused);
         if (flipcpu_ui::button("Reset")) setupScene();
         flipcpu_ui::endPanel();
-
         flipcpu_ui::restoreProjection();
 
         glXSwapBuffers(w.dpy, w.xwin);
 
-        // ----- per-stage timing: T9_render, T_total, and 60-frame report -----
+        // ----- timing: T9_render, T_total, 60-frame report -----
         auto frameEnd = std::chrono::steady_clock::now();
         auto msSince = [](std::chrono::steady_clock::time_point a,
                           std::chrono::steady_clock::time_point b) {
             return std::chrono::duration<double, std::milli>(b - a).count();
         };
-        FlipFluid& ftim = *scene.fluid;
-        fliptiming::stageAdd(ftim.timing, fliptiming::T9_render,
-                             msSince(renderStart, frameEnd));
-        fliptiming::stageAdd(ftim.timing, fliptiming::T_total,
-                             msSince(frameStart, frameEnd));
-        fliptiming::stageReportEvery(ftim.timing, 60, "CPU");
+        // Re-fetch: setupScene() above (res change / Reset) may have replaced fluid.
+        FlipFluidCuda& ft = *scene.fluid;
+        fliptiming::stageAdd(ft.timing, fliptiming::T9_render, msSince(renderStart, frameEnd));
+        fliptiming::stageAdd(ft.timing, fliptiming::T_total,   msSince(frameStart, frameEnd));
+        fliptiming::stageReportEvery(ft.timing, 60, "CUDA");
 
-        // ----- fps -----
         fpsFrames += 1;
         double elapsed = std::chrono::duration<double>(frameEnd - fpsT0).count();
-        if (elapsed >= 0.5) {
-            lastFps = fpsFrames / elapsed;
-            std::snprintf(fpsStr, sizeof(fpsStr), "%.1f", lastFps);
-            fpsT0 = frameEnd;
-            fpsFrames = 0;
-        }
+        if (elapsed >= 0.5) { lastFps = fpsFrames / elapsed; fpsT0 = frameEnd; fpsFrames = 0; }
     }
 
     destroyWindow(w);
