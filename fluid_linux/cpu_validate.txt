@@ -1,0 +1,46 @@
+[flip-cpp] starting (CPU sim, GPU render)
+[flip-cpp] validation: 120 deterministic frames/resolution (no render)
+
+=== [CPU] numerical validation (res=50, 120 frames, deterministic) ===
+config: gravity ON, separate ON, drift ON, flipRatio=0.90, obstacle static @ (3.0,2.0)
+  particles    : 4189
+  centroid     : (2.203510, 0.807815)
+  pos std dev  : (0.975085, 0.487848)
+  bbox x       : [0.077341, 3.779802]
+  bbox y       : [0.077341, 2.626255]
+  mean speed   : 1.157710
+  max  speed   : 5.946815
+  total KE     : 3989.078548
+
+=== [CPU] numerical validation (res=100, 120 frames, deterministic) ===
+config: gravity ON, separate ON, drift ON, flipRatio=0.90, obstacle static @ (3.0,2.0)
+  particles    : 18352
+  centroid     : (2.196821, 0.807354)
+  pos std dev  : (0.998851, 0.497787)
+  bbox x       : [0.038900, 3.818243]
+  bbox y       : [0.038900, 2.756038]
+  mean speed   : 1.163985
+  max  speed   : 6.666786
+  total KE     : 18762.217075
+
+=== [CPU] numerical validation (res=150, 120 frames, deterministic) ===
+config: gravity ON, separate ON, drift ON, flipRatio=0.90, obstacle static @ (3.0,2.0)
+  particles    : 42300
+  centroid     : (2.231142, 0.842164)
+  pos std dev  : (0.978782, 0.526754)
+  bbox x       : [0.025985, 3.831158]
+  bbox y       : [0.025985, 2.508364]
+  mean speed   : 1.143886
+  max  speed   : 7.100980
+  total KE     : 42289.558563
+
+=== [CPU] numerical validation (res=200, 120 frames, deterministic) ===
+config: gravity ON, separate ON, drift ON, flipRatio=0.90, obstacle static @ (3.0,2.0)
+  particles    : 76104
+  centroid     : (2.218092, 0.845171)
+  pos std dev  : (0.995880, 0.530130)
+  bbox x       : [0.019450, 3.837693]
+  bbox y       : [0.019450, 2.509064]
+  mean speed   : 1.182108
+  max  speed   : 7.349530
+  total KE     : 80973.050687

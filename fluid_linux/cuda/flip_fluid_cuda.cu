@@ -690,6 +690,24 @@ void FlipFluidCuda::updateCellColorsOnce() {
     CUDA_CHECK(cudaDeviceSynchronize());
 }
 
+void FlipFluidCuda::downloadParticles(std::vector<float>& posXY,
+                                      std::vector<float>& velXY) {
+    posXY.resize(2 * numParticles);
+    velXY.resize(2 * numParticles);
+    CUDA_CHECK(cudaMemcpy(velXY.data(), d_vel, numParticles * sizeof(float2),
+                          cudaMemcpyDeviceToHost));
+    if (interopEnabled) {
+        float2* pos = nullptr; float3* col = nullptr;
+        mapVBOs(&pos, &col);
+        CUDA_CHECK(cudaMemcpy(posXY.data(), pos, numParticles * sizeof(float2),
+                              cudaMemcpyDeviceToHost));
+        unmapVBOs();
+    } else {
+        CUDA_CHECK(cudaMemcpy(posXY.data(), d_pos, numParticles * sizeof(float2),
+                              cudaMemcpyDeviceToHost));
+    }
+}
+
 void FlipFluidCuda::downloadCellColors(std::vector<float>& out) {
     out.resize(3 * fNumCells);
     CUDA_CHECK(cudaMemcpy(out.data(), d_cellColor, 3 * fNumCells * sizeof(float),

@@ -450,16 +450,84 @@ static void runBenchmark(AppWindow& w) {
     std::fflush(stdout);
 }
 
+// --------------------------- validation -------------------------------------
+// Separate mode (--validate): a deterministic, no-render run whose only purpose is
+// to print aggregate particle statistics for comparison against the CPU build. It is
+// dispatched on its own and exits, so it never runs during normal play or --bench.
+static fliptiming::ParticleStats statsFromInterleaved(const std::vector<float>& pos,
+                                                      const std::vector<float>& vel,
+                                                      int n) {
+    fliptiming::ParticleStats s;
+    s.n = n;
+    double sx = 0, sy = 0, sx2 = 0, sy2 = 0, ssp = 0, ske = 0, msp = 0;
+    double minx = 1e30, maxx = -1e30, miny = 1e30, maxy = -1e30;
+    for (int i = 0; i < n; ++i) {
+        double x = pos[2 * i], y = pos[2 * i + 1];
+        double vx = vel[2 * i], vy = vel[2 * i + 1];
+        sx += x; sy += y; sx2 += x * x; sy2 += y * y;
+        if (x < minx) minx = x; if (x > maxx) maxx = x;
+        if (y < miny) miny = y; if (y > maxy) maxy = y;
+        double sp = std::sqrt(vx * vx + vy * vy);
+        ssp += sp; if (sp > msp) msp = sp;
+        ske += 0.5 * (vx * vx + vy * vy);
+    }
+    int d = n > 0 ? n : 1;
+    s.cx = sx / d; s.cy = sy / d;
+    s.sdx = std::sqrt(std::max(0.0, sx2 / d - s.cx * s.cx));
+    s.sdy = std::sqrt(std::max(0.0, sy2 / d - s.cy * s.cy));
+    s.minx = minx; s.maxx = maxx; s.miny = miny; s.maxy = maxy;
+    s.meanSpeed = ssp / d; s.maxSpeed = msp; s.ke = ske;
+    return s;
+}
+
+static void runValidation(AppWindow& w) {
+    static const int resList[] = {50, 100, 150, 200};
+    const int NRES = (int)(sizeof(resList) / sizeof(resList[0]));
+    const int VAL_FRAMES = 120;   // must match the CPU build for a valid comparison
+    std::printf("[flip-cuda] validation: %d deterministic frames/resolution (no render)\n",
+                VAL_FRAMES);
+    std::vector<float> pos, vel;
+    for (int ri = 0; ri < NRES && w.running; ++ri) {
+        scene.resolution = resList[ri];
+        setupScene();
+        scene.paused = false;
+        FlipFluidCuda& f = *scene.fluid;
+        for (int frame = 0; frame < VAL_FRAMES && w.running; ++frame) {
+            while (XPending(w.dpy) > 0) {
+                XEvent e; XNextEvent(w.dpy, &e);
+                if (e.type == ClientMessage &&
+                    (Atom)e.xclient.data.l[0] == w.wm_delete) w.running = false;
+                else if (e.type == KeyPress) {
+                    KeySym ks = XLookupKeysym(&e.xkey, 0);
+                    if (ks == XK_q || ks == XK_Q || ks == XK_Escape) w.running = false;
+                }
+            }
+            f.simulate(scene.dt, scene.gravity, scene.flipRatio,
+                       scene.numPressureIters, scene.numParticleIters,
+                       scene.overRelaxation, scene.compensateDrift,
+                       scene.separateParticles,
+                       scene.obstacleX, scene.obstacleY, scene.obstacleRadius,
+                       scene.obstacleVelX, scene.obstacleVelY, scene.numSubSteps);
+        }
+        f.downloadParticles(pos, vel);
+        fliptiming::printParticleStats("CUDA", resList[ri], VAL_FRAMES,
+                                       statsFromInterleaved(pos, vel, f.numParticles));
+    }
+}
+
 // --------------------------- main -------------------------------------------
 int main(int argc, char** argv) {
     bool noVsync = false;
     bool bench   = false;
+    bool validate = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--no-vsync") == 0) noVsync = true;
         else if (std::strcmp(argv[i], "--bench") == 0) { bench = true; noVsync = true; }
+        else if (std::strcmp(argv[i], "--validate") == 0) validate = true;
         else if (std::strcmp(argv[i], "-h") == 0 || std::strcmp(argv[i], "--help") == 0) {
-            std::printf("Usage: %s [--no-vsync] [--bench]\n", argv[0]);
-            std::printf("  --bench   run the per-stage benchmark (res 50/100/150/200) and exit\n");
+            std::printf("Usage: %s [--no-vsync] [--bench] [--validate]\n", argv[0]);
+            std::printf("  --bench     run the per-stage benchmark (res 50/100/150/200) and exit\n");
+            std::printf("  --validate  run the deterministic numeric-validation pass and exit\n");
             std::printf("Controls: LMB=move obstacle, SPACE/P=pause, G=grid, R=reset, Q/Esc=quit\n");
             return 0;
         }
@@ -483,6 +551,13 @@ int main(int argc, char** argv) {
 
     if (bench) {
         runBenchmark(w);
+        destroyWindow(w);
+        delete scene.fluid;
+        return 0;
+    }
+
+    if (validate) {
+        runValidation(w);
         destroyWindow(w);
         delete scene.fluid;
         return 0;

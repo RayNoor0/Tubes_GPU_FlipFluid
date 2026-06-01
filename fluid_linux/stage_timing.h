@@ -71,4 +71,35 @@ inline void stageReportEvery(StageStats& st, int N, const char* tag) {
     st.frames = 0;
 }
 
+// --- numerical validation -----------------------------------------------------
+// Aggregate physical quantities of the particle set at a fixed deterministic frame,
+// used to compare the CUDA build against the CPU reference. Results will not be
+// bit-identical (red-black GS reorders updates, float atomicAdd is non-associative),
+// but these bulk quantities should agree to a few significant figures.
+struct ParticleStats {
+    int    n = 0;
+    double cx = 0, cy = 0;          // centroid
+    double sdx = 0, sdy = 0;        // position std dev
+    double minx = 0, maxx = 0, miny = 0, maxy = 0;
+    double meanSpeed = 0, maxSpeed = 0;
+    double ke = 0;                  // total kinetic energy, sum 0.5*|v|^2
+};
+
+inline void printParticleStats(const char* tag, int res, int frames,
+                               const ParticleStats& s) {
+    std::printf("\n=== [%s] numerical validation (res=%d, %d frames, deterministic) ===\n",
+                tag, res, frames);
+    std::printf("config: gravity ON, separate ON, drift ON, flipRatio=0.90, "
+                "obstacle static @ (3.0,2.0)\n");
+    std::printf("  particles    : %d\n", s.n);
+    std::printf("  centroid     : (%.6f, %.6f)\n", s.cx, s.cy);
+    std::printf("  pos std dev  : (%.6f, %.6f)\n", s.sdx, s.sdy);
+    std::printf("  bbox x       : [%.6f, %.6f]\n", s.minx, s.maxx);
+    std::printf("  bbox y       : [%.6f, %.6f]\n", s.miny, s.maxy);
+    std::printf("  mean speed   : %.6f\n", s.meanSpeed);
+    std::printf("  max  speed   : %.6f\n", s.maxSpeed);
+    std::printf("  total KE     : %.6f\n", s.ke);
+    std::fflush(stdout);
+}
+
 }

@@ -1,0 +1,51 @@
+[flip-cuda] starting (GPU sim, CUDA-GL interop render)
+[flip-cuda] CUDA-GL interop: DISABLED -> device->host copy (T10_d2h) [expected on WSL2]
+[flip-cuda] validation: 120 deterministic frames/resolution (no render)
+[flip-cuda] CUDA-GL interop: DISABLED -> device->host copy (T10_d2h) [expected on WSL2]
+
+=== [CUDA] numerical validation (res=50, 120 frames, deterministic) ===
+config: gravity ON, separate ON, drift ON, flipRatio=0.90, obstacle static @ (3.0,2.0)
+  particles    : 4189
+  centroid     : (2.230783, 0.824192)
+  pos std dev  : (0.945559, 0.491354)
+  bbox x       : [0.077341, 3.779802]
+  bbox y       : [0.077341, 2.147449]
+  mean speed   : 1.087366
+  max  speed   : 5.984565
+  total KE     : 3538.898162
+[flip-cuda] CUDA-GL interop: DISABLED -> device->host copy (T10_d2h) [expected on WSL2]
+
+=== [CUDA] numerical validation (res=100, 120 frames, deterministic) ===
+config: gravity ON, separate ON, drift ON, flipRatio=0.90, obstacle static @ (3.0,2.0)
+  particles    : 18352
+  centroid     : (2.213548, 0.814450)
+  pos std dev  : (0.990903, 0.497660)
+  bbox x       : [0.038900, 3.818243]
+  bbox y       : [0.038900, 2.773796]
+  mean speed   : 1.132214
+  max  speed   : 6.499249
+  total KE     : 17599.901976
+[flip-cuda] CUDA-GL interop: DISABLED -> device->host copy (T10_d2h) [expected on WSL2]
+
+=== [CUDA] numerical validation (res=150, 120 frames, deterministic) ===
+config: gravity ON, separate ON, drift ON, flipRatio=0.90, obstacle static @ (3.0,2.0)
+  particles    : 42300
+  centroid     : (2.231184, 0.836260)
+  pos std dev  : (0.982089, 0.523243)
+  bbox x       : [0.025985, 3.831158]
+  bbox y       : [0.025985, 2.334466]
+  mean speed   : 1.148076
+  max  speed   : 8.011110
+  total KE     : 42417.922271
+[flip-cuda] CUDA-GL interop: DISABLED -> device->host copy (T10_d2h) [expected on WSL2]
+
+=== [CUDA] numerical validation (res=200, 120 frames, deterministic) ===
+config: gravity ON, separate ON, drift ON, flipRatio=0.90, obstacle static @ (3.0,2.0)
+  particles    : 76104
+  centroid     : (2.229911, 0.846356)
+  pos std dev  : (0.987727, 0.530740)
+  bbox x       : [0.019450, 3.837693]
+  bbox y       : [0.019450, 2.165232]
+  mean speed   : 1.187015
+  max  speed   : 6.799527
+  total KE     : 81648.079708

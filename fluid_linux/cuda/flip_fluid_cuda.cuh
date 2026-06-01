@@ -124,6 +124,11 @@ public:
     const std::vector<float>& hostPositions() const { return hostPos; }
     const std::vector<float>& hostColors() const { return hostCol; }
 
+    // Copy current particle positions (float2) and velocities (float2) to host,
+    // interleaved as [x0,y0,x1,y1,...]. Used by the --validate mode; works in both
+    // interop (maps the VBO) and no-interop modes.
+    void downloadParticles(std::vector<float>& posXY, std::vector<float>& velXY);
+
     // Obstacle carve (mirror of carveObstacle): writes d_s, d_u, d_v.
     void carveObstacle(float x, float y, float r, float vx, float vy);
 
