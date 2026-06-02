@@ -11,15 +11,7 @@ NVCCFLAGS ?= -O3 -std=c++17 --use_fast_math $(ARCH)
 CXX       ?= g++
 CXXFLAGS  ?= -std=c++17 -O3 -Wall
 
-# NVTX (Nsight Systems stage ranges, bonus B2): build with `make USE_NVTX=1`.
-ifeq ($(USE_NVTX),1)
-NVCCFLAGS += -DUSE_NVTX -lineinfo
-NVTX_LIB  := -lnvToolsExt
-else
-NVTX_LIB  :=
-endif
-
-LIBS := -lGL -lGLX -lX11 -lm $(NVTX_LIB)
+LIBS := -lGL -lGLX -lX11 -lm
 
 CU_SRC := main_cuda.cu flip_fluid_cuda.cu
 CU_OBJ := $(CU_SRC:.cu=.o)

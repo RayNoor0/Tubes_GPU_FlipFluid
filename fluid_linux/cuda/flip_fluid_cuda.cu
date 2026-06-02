@@ -13,17 +13,6 @@
 #include <thrust/scan.h>
 #include <thrust/execution_policy.h>
 
-// NVTX stage ranges for Nsight Systems (bonus B2). Enabled with -DUSE_NVTX; no-ops
-// otherwise so the default build carries zero overhead.
-#ifdef USE_NVTX
-#include <nvToolsExt.h>
-#define NVTX_PUSH(name) nvtxRangePushA(name)
-#define NVTX_POP()      nvtxRangePop()
-#else
-#define NVTX_PUSH(name) ((void)0)
-#define NVTX_POP()      ((void)0)
-#endif
-
 namespace flipcuda {
 
 static inline int divUp(int a, int b) { return (a + b - 1) / b; }
@@ -744,8 +733,8 @@ void FlipFluidCuda::simulate(float dt, float gravity, float flipRatio,
     float sdt = dt / numSubSteps;
 
     using fliptiming::Stage;
-    auto recA = [&](Stage s){ NVTX_PUSH(fliptiming::stageName(s)); cudaEventRecord(evStart[s]); };
-    auto recB = [&](Stage s){ cudaEventRecord(evStop[s]); NVTX_POP(); };
+    auto recA = [&](Stage s){ cudaEventRecord(evStart[s]); };
+    auto recB = [&](Stage s){ cudaEventRecord(evStop[s]); };
 
     for (int step = 0; step < numSubSteps; ++step) {
         recA(fliptiming::T1_integrate); k_integrate(pos, sdt, gravity); recB(fliptiming::T1_integrate);
