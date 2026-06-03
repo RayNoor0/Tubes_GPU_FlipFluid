@@ -1,0 +1,11 @@
+# Compiled object files and binaries
+*.o
+*.a
+fluid_linux/flip
+fluid_linux/cuda/flip_cuda
+fluid_linux_emery/flip
+
+# macOS metadata
+__MACOSX/
+._*
+.DS_Store
