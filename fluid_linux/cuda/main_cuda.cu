@@ -253,6 +253,27 @@ struct AppWindow {
     bool running = true;
 };
 
+static bool setSwapInterval(AppWindow& w, int interval) {
+    using SwapIntervalEXT = void (*)(Display*, GLXDrawable, int);
+    using SwapIntervalMESA = int (*)(unsigned int);
+    using SwapIntervalSGI = int (*)(int);
+
+    auto ext = (SwapIntervalEXT)glXGetProcAddressARB(
+        (const GLubyte*)"glXSwapIntervalEXT");
+    if (ext) {
+        ext(w.dpy, (GLXDrawable)w.xwin, interval);
+        return true;
+    }
+
+    auto mesa = (SwapIntervalMESA)glXGetProcAddressARB(
+        (const GLubyte*)"glXSwapIntervalMESA");
+    if (mesa && mesa((unsigned int)interval) == 0) return true;
+
+    auto sgi = (SwapIntervalSGI)glXGetProcAddressARB(
+        (const GLubyte*)"glXSwapIntervalSGI");
+    return sgi && sgi(interval) == 0;
+}
+
 static bool createWindow(AppWindow& w, const char* title) {
     w.dpy = XOpenDisplay(nullptr);
     if (!w.dpy) { std::fprintf(stderr, "Cannot open X display\n"); return false; }
@@ -278,8 +299,9 @@ static bool createWindow(AppWindow& w, const char* title) {
     if (!w.glc) { std::fprintf(stderr, "glXCreateContext failed\n"); return false; }
     glXMakeCurrent(w.dpy, w.xwin, w.glc);
 
-    glEnable(GL_POINT_SMOOTH);
-    glHint(GL_POINT_SMOOTH_HINT, GL_NICEST);
+    // Smooth legacy GL points are very expensive for tens of thousands of
+    // particles on GLX/WSL. Keep particles as fast opaque points.
+    glDisable(GL_POINT_SMOOTH);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
@@ -345,6 +367,7 @@ static void drawParticles(FlipFluidCuda& f, int viewportH) {
     float diameterPx = 2.0f * f.particleRadius * pxPerSimUnit;
     if (diameterPx < 1.0f) diameterPx = 1.0f;
     glPointSize(diameterPx);
+    glDisable(GL_BLEND);
 
     if (f.usingInterop()) {
         // Kernels wrote the VBOs directly (B1) — draw straight from them.
@@ -364,12 +387,14 @@ static void drawParticles(FlipFluidCuda& f, int viewportH) {
         // client-side arrays cause inside glDrawArrays — same data movement, but
         // pipelined through the VBO path so the GPU reads from its own memory.
         int np = f.numParticles;
+        const GLsizeiptr posBytes = (GLsizeiptr)(np * 2 * sizeof(float));
+        const GLsizeiptr colBytes = (GLsizeiptr)(np * 3 * sizeof(float));
         pglBindBuffer(GL_ARRAY_BUFFER, g_posVBO);
-        pglBufferSubData(GL_ARRAY_BUFFER, 0, np * 2 * sizeof(float),
-                         f.hostPositions().data());
+        pglBufferData(GL_ARRAY_BUFFER, posBytes, nullptr, GL_DYNAMIC_DRAW);
+        pglBufferSubData(GL_ARRAY_BUFFER, 0, posBytes, f.hostPositions().data());
         pglBindBuffer(GL_ARRAY_BUFFER, g_colVBO);
-        pglBufferSubData(GL_ARRAY_BUFFER, 0, np * 3 * sizeof(float),
-                         f.hostColors().data());
+        pglBufferData(GL_ARRAY_BUFFER, colBytes, nullptr, GL_DYNAMIC_DRAW);
+        pglBufferSubData(GL_ARRAY_BUFFER, 0, colBytes, f.hostColors().data());
 
         pglBindBuffer(GL_ARRAY_BUFFER, g_posVBO);
         glEnableClientState(GL_VERTEX_ARRAY);
@@ -382,6 +407,7 @@ static void drawParticles(FlipFluidCuda& f, int viewportH) {
         glDisableClientState(GL_VERTEX_ARRAY);
         pglBindBuffer(GL_ARRAY_BUFFER, 0);
     }
+    glEnable(GL_BLEND);
 }
 
 static void drawObstacle(FlipFluidCuda& f, float ox, float oy, float orad) {
@@ -611,10 +637,8 @@ int main(int argc, char** argv) {
     loadGLBuffers();
 
     if (noVsync) {
-        typedef int (*PFNGLXSWAPINTERVAL)(int);
-        auto pfn = (PFNGLXSWAPINTERVAL)glXGetProcAddressARB(
-            (const GLubyte*)"glXSwapIntervalMESA");
-        if (pfn) pfn(0);
+        if (!setSwapInterval(w, 0))
+            std::fprintf(stderr, "[flip-cuda] warning: could not disable GLX swap interval\n");
     }
 
     setupScene();
