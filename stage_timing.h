@@ -20,7 +20,13 @@ enum Stage {
     T6_pressure,      // solveIncompressibility (pressure solve loop)
     T7_g2p,           // transferVelocities(toGrid=false)
     T8_colors,        // updateParticleColors + updateCellColors
-    T9_render,        // draw + buffer swap (host GL)
+    T9_render,        // total render (sum of T9a..T9f)
+    T9a_clear,        // glClear + setProjection
+    T9b_grid,         // drawGrid
+    T9c_particles,    // drawParticles
+    T9d_obstacle,     // drawObstacle
+    T9e_ui,           // UI overlay (setProjectionToPixels .. restoreProjection)
+    T9f_swap,         // glXSwapBuffers
     T10_transfer,     // CUDA only: D2H copy (no interop) or map/unmap (B1 interop). 0 on CPU.
     T_total,          // whole frame
     STAGE_COUNT
@@ -28,9 +34,11 @@ enum Stage {
 
 inline const char* stageName(int s) {
     static const char* names[STAGE_COUNT] = {
-        "T1_integrate", "T2_pushApart", "T3_collisions", "T4_p2g",
-        "T5_density",   "T6_pressure",  "T7_g2p",        "T8_colors",
-        "T9_render",    "T10_transfer", "T_total"
+        "T1_integrate", "T2_pushApart",   "T3_collisions", "T4_p2g",
+        "T5_density",   "T6_pressure",    "T7_g2p",        "T8_colors",
+        "T9_render",    "T9a_clear",      "T9b_grid",      "T9c_particles",
+        "T9d_obstacle", "T9e_ui",         "T9f_swap",
+        "T10_transfer", "T_total"
     };
     return names[s];
 }
