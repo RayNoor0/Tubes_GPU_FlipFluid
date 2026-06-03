@@ -65,21 +65,27 @@ constexpr float simWidth = float(CANVAS_W) / cScale;
 static PFNGLGENBUFFERSPROC    pglGenBuffers    = nullptr;
 static PFNGLBINDBUFFERPROC    pglBindBuffer    = nullptr;
 static PFNGLBUFFERDATAPROC    pglBufferData    = nullptr;
+static PFNGLBUFFERSUBDATAPROC pglBufferSubData = nullptr;
 static PFNGLDELETEBUFFERSPROC pglDeleteBuffers = nullptr;
 
 static void loadGLBuffers() {
     pglGenBuffers    = (PFNGLGENBUFFERSPROC)    glXGetProcAddressARB((const GLubyte*)"glGenBuffers");
     pglBindBuffer    = (PFNGLBINDBUFFERPROC)    glXGetProcAddressARB((const GLubyte*)"glBindBuffer");
     pglBufferData    = (PFNGLBUFFERDATAPROC)    glXGetProcAddressARB((const GLubyte*)"glBufferData");
+    pglBufferSubData = (PFNGLBUFFERSUBDATAPROC) glXGetProcAddressARB((const GLubyte*)"glBufferSubData");
     pglDeleteBuffers = (PFNGLDELETEBUFFERSPROC) glXGetProcAddressARB((const GLubyte*)"glDeleteBuffers");
-    if (!pglGenBuffers || !pglBindBuffer || !pglBufferData || !pglDeleteBuffers) {
+    if (!pglGenBuffers || !pglBindBuffer || !pglBufferData || !pglBufferSubData || !pglDeleteBuffers) {
         std::fprintf(stderr, "Failed to load GL VBO functions (need GL >= 1.5)\n");
         std::exit(1);
     }
 }
 
-static GLuint g_posVBO = 0;   // float2 per particle (interop)
-static GLuint g_colVBO = 0;   // float3 per particle (interop)
+static GLuint g_posVBO = 0;      // float2 per particle (interop)
+static GLuint g_colVBO = 0;      // float3 per particle (interop)
+
+static GLuint g_gridPosVBO = 0;  // float2 per grid quad vertex (static)
+static GLuint g_gridColVBO = 0;  // float3 per grid quad vertex (dynamic)
+static int    g_gridVerts  = 0;  // fNumX * fNumY * 4
 
 // --------------------------- scene helpers ----------------------------------
 static void setObstacle(float x, float y, bool reset) {
@@ -120,6 +126,38 @@ static void setupTank(std::vector<float>& s, int fNumX, int fNumY) {
             if (i == 0 || i == fNumX - 1 || j == 0) sVal = 0.0f;
             s[i * n + j] = sVal;
         }
+}
+
+// Builds the grid mesh VBOs from the current fluid geometry.
+// Position VBO is GL_STATIC_DRAW (grid never moves); color VBO is
+// GL_DYNAMIC_DRAW (updated every frame when the grid overlay is shown).
+static void setupGridVBO(FlipFluidCuda& f) {
+    if (g_gridPosVBO) pglDeleteBuffers(1, &g_gridPosVBO);
+    if (g_gridColVBO) pglDeleteBuffers(1, &g_gridColVBO);
+    pglGenBuffers(1, &g_gridPosVBO);
+    pglGenBuffers(1, &g_gridColVBO);
+
+    int nc = f.fNumX * f.fNumY;
+    g_gridVerts = nc * 4;
+    float h = f.h;
+
+    std::vector<float> pos(g_gridVerts * 2);
+    int vi = 0;
+    for (int i = 0; i < f.fNumX; ++i) {
+        for (int j = 0; j < f.fNumY; ++j) {
+            float x0 = i * h, y0 = j * h, x1 = x0 + h, y1 = y0 + h;
+            pos[vi++] = x0; pos[vi++] = y0;
+            pos[vi++] = x1; pos[vi++] = y0;
+            pos[vi++] = x1; pos[vi++] = y1;
+            pos[vi++] = x0; pos[vi++] = y1;
+        }
+    }
+    pglBindBuffer(GL_ARRAY_BUFFER, g_gridPosVBO);
+    pglBufferData(GL_ARRAY_BUFFER, pos.size() * sizeof(float), pos.data(), GL_STATIC_DRAW);
+
+    pglBindBuffer(GL_ARRAY_BUFFER, g_gridColVBO);
+    pglBufferData(GL_ARRAY_BUFFER, g_gridVerts * 3 * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
+    pglBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
 static void setupScene() {
@@ -193,6 +231,7 @@ static void setupScene() {
 
     setObstacle(3.0f, 2.0f, true);
     f.updateCellColorsOnce();
+    setupGridVBO(f);
     scene.frameNr = 0;
 }
 
@@ -263,23 +302,42 @@ static void setProjection(int w, int h) {
     glLoadIdentity();
 }
 
-// Grid overlay (debug, default off): pulls cellColor back to the host. This is the
-// only device->host copy in the program and is skipped unless the grid is shown.
+// Grid overlay (debug, default off): D2H copy of cell colors, then one
+// glDrawArrays call via pre-built VBOs — replaces the old per-vertex
+// glBegin/glEnd loop that issued O(fNumCells * 16) individual GL calls.
 static void drawGrid(FlipFluidCuda& f) {
-    static std::vector<float> cc;
+    static std::vector<float> cc;  // cell colors: fNumCells * 3
+    static std::vector<float> vc;  // per-vertex colors: fNumCells * 4 * 3
     f.downloadCellColors(cc);
-    float h = f.h;
-    glBegin(GL_QUADS);
-    for (int i = 0; i < f.fNumX; ++i) {
-        for (int j = 0; j < f.fNumY; ++j) {
-            int idx = i * f.fNumY + j;
-            glColor3f(cc[3 * idx + 0], cc[3 * idx + 1], cc[3 * idx + 2]);
-            float x0 = i * h, y0 = j * h, x1 = x0 + h, y1 = y0 + h;
-            glVertex2f(x0, y0); glVertex2f(x1, y0);
-            glVertex2f(x1, y1); glVertex2f(x0, y1);
+
+    // Expand each cell color to its 4 quad vertices.
+    int nc = f.fNumX * f.fNumY;
+    vc.resize(nc * 4 * 3);
+    for (int c = 0; c < nc; ++c) {
+        float r = cc[3*c+0], g = cc[3*c+1], b = cc[3*c+2];
+        for (int v = 0; v < 4; ++v) {
+            vc[(c*4+v)*3+0] = r;
+            vc[(c*4+v)*3+1] = g;
+            vc[(c*4+v)*3+2] = b;
         }
     }
-    glEnd();
+
+    pglBindBuffer(GL_ARRAY_BUFFER, g_gridColVBO);
+    pglBufferSubData(GL_ARRAY_BUFFER, 0, vc.size() * sizeof(float), vc.data());
+
+    pglBindBuffer(GL_ARRAY_BUFFER, g_gridPosVBO);
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glVertexPointer(2, GL_FLOAT, 0, (void*)0);
+
+    pglBindBuffer(GL_ARRAY_BUFFER, g_gridColVBO);
+    glEnableClientState(GL_COLOR_ARRAY);
+    glColorPointer(3, GL_FLOAT, 0, (void*)0);
+
+    glDrawArrays(GL_QUADS, 0, g_gridVerts);
+
+    glDisableClientState(GL_COLOR_ARRAY);
+    glDisableClientState(GL_VERTEX_ARRAY);
+    pglBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
 static void drawParticles(FlipFluidCuda& f, int viewportH) {
@@ -301,15 +359,28 @@ static void drawParticles(FlipFluidCuda& f, int viewportH) {
         glDisableClientState(GL_VERTEX_ARRAY);
         pglBindBuffer(GL_ARRAY_BUFFER, 0);
     } else {
-        // No interop: draw from the host arrays filled by the D2H copy in simulate().
-        pglBindBuffer(GL_ARRAY_BUFFER, 0);
+        // No interop (WSL2): upload the D2H-copied host arrays into the existing
+        // VBOs, then draw from them. This avoids the implicit synchronous DMA that
+        // client-side arrays cause inside glDrawArrays — same data movement, but
+        // pipelined through the VBO path so the GPU reads from its own memory.
+        int np = f.numParticles;
+        pglBindBuffer(GL_ARRAY_BUFFER, g_posVBO);
+        pglBufferSubData(GL_ARRAY_BUFFER, 0, np * 2 * sizeof(float),
+                         f.hostPositions().data());
+        pglBindBuffer(GL_ARRAY_BUFFER, g_colVBO);
+        pglBufferSubData(GL_ARRAY_BUFFER, 0, np * 3 * sizeof(float),
+                         f.hostColors().data());
+
+        pglBindBuffer(GL_ARRAY_BUFFER, g_posVBO);
         glEnableClientState(GL_VERTEX_ARRAY);
-        glVertexPointer(2, GL_FLOAT, 0, f.hostPositions().data());
+        glVertexPointer(2, GL_FLOAT, 0, (void*)0);
+        pglBindBuffer(GL_ARRAY_BUFFER, g_colVBO);
         glEnableClientState(GL_COLOR_ARRAY);
-        glColorPointer(3, GL_FLOAT, 0, f.hostColors().data());
-        glDrawArrays(GL_POINTS, 0, f.numParticles);
+        glColorPointer(3, GL_FLOAT, 0, (void*)0);
+        glDrawArrays(GL_POINTS, 0, np);
         glDisableClientState(GL_COLOR_ARRAY);
         glDisableClientState(GL_VERTEX_ARRAY);
+        pglBindBuffer(GL_ARRAY_BUFFER, 0);
     }
 }
 
