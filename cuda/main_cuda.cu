@@ -81,6 +81,10 @@ static void loadGLBuffers() {
 static GLuint g_posVBO = 0;   // float2 per particle (interop)
 static GLuint g_colVBO = 0;   // float3 per particle (interop)
 
+static GLuint g_gridPosVBO = 0;  // float2 per vertex, 4 verts/cell (static, rebuilt on res change)
+static GLuint g_gridColVBO = 0;  // float3 per vertex, 4 verts/cell (dynamic, updated each frame)
+static int    g_gridNumVerts = 0;
+
 // --------------------------- scene helpers ----------------------------------
 static void setObstacle(float x, float y, bool reset) {
     float vx = 0.0f, vy = 0.0f;
@@ -163,6 +167,9 @@ static void setupScene() {
     // (Re)create the interop VBOs sized for this resolution.
     if (g_posVBO) pglDeleteBuffers(1, &g_posVBO);
     if (g_colVBO) pglDeleteBuffers(1, &g_colVBO);
+    // Grid VBOs are rebuilt lazily in drawGrid on next resolution mismatch.
+    if (g_gridPosVBO) { pglDeleteBuffers(1, &g_gridPosVBO); g_gridPosVBO = 0; }
+    if (g_gridColVBO) { pglDeleteBuffers(1, &g_gridColVBO); g_gridColVBO = 0; }
     pglGenBuffers(1, &g_posVBO);
     pglGenBuffers(1, &g_colVBO);
 
@@ -263,23 +270,71 @@ static void setProjection(int w, int h) {
     glLoadIdentity();
 }
 
-// Grid overlay (debug, default off): pulls cellColor back to the host. This is the
-// only device->host copy in the program and is skipped unless the grid is shown.
+// Build the static position VBO for the grid (4 vertices per cell, GL_QUADS layout).
+// Called once per resolution — positions never change within a scene.
+static void buildGridPosVBO(FlipFluidCuda& f) {
+    const int ncells = f.fNumX * f.fNumY;
+    std::vector<float> pos;
+    pos.reserve(ncells * 8); // 4 verts * 2 floats
+    const float h = f.h;
+    for (int i = 0; i < f.fNumX; ++i) {
+        for (int j = 0; j < f.fNumY; ++j) {
+            float x0 = i*h, y0 = j*h, x1 = x0+h, y1 = y0+h;
+            pos.insert(pos.end(), {x0,y0, x1,y0, x1,y1, x0,y1});
+        }
+    }
+    if (!g_gridPosVBO) pglGenBuffers(1, &g_gridPosVBO);
+    pglBindBuffer(GL_ARRAY_BUFFER, g_gridPosVBO);
+    pglBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(pos.size()*sizeof(float)), pos.data(), GL_STATIC_DRAW);
+    pglBindBuffer(GL_ARRAY_BUFFER, 0);
+    g_gridNumVerts = ncells * 4;
+}
+
+// Grid overlay (debug, default off): D2H copy then bulk VBO upload — one glDrawArrays call
+// instead of per-vertex immediate mode. Position VBO is static; color VBO is dynamic.
 static void drawGrid(FlipFluidCuda& f) {
     static std::vector<float> cc;
-    f.downloadCellColors(cc);
-    float h = f.h;
-    glBegin(GL_QUADS);
+    static int lastFNumX = -1, lastFNumY = -1;
+
+    // Rebuild position VBO only when resolution changes.
+    if (f.fNumX != lastFNumX || f.fNumY != lastFNumY) {
+        buildGridPosVBO(f);
+        lastFNumX = f.fNumX;
+        lastFNumY = f.fNumY;
+    }
+
+    f.downloadCellColors(cc); // D2H — unavoidable without CUDA-side color writes to a VBO
+
+    // Expand per-cell colors (3 floats) to per-vertex (4 verts/cell × 3 floats).
+    const int ncells = f.fNumX * f.fNumY;
+    std::vector<float> col;
+    col.reserve(ncells * 12);
     for (int i = 0; i < f.fNumX; ++i) {
         for (int j = 0; j < f.fNumY; ++j) {
             int idx = i * f.fNumY + j;
-            glColor3f(cc[3 * idx + 0], cc[3 * idx + 1], cc[3 * idx + 2]);
-            float x0 = i * h, y0 = j * h, x1 = x0 + h, y1 = y0 + h;
-            glVertex2f(x0, y0); glVertex2f(x1, y0);
-            glVertex2f(x1, y1); glVertex2f(x0, y1);
+            float r = cc[3*idx], g = cc[3*idx+1], b = cc[3*idx+2];
+            for (int v = 0; v < 4; ++v)
+                col.insert(col.end(), {r, g, b});
         }
     }
-    glEnd();
+
+    if (!g_gridColVBO) pglGenBuffers(1, &g_gridColVBO);
+    pglBindBuffer(GL_ARRAY_BUFFER, g_gridColVBO);
+    pglBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(col.size()*sizeof(float)), col.data(), GL_DYNAMIC_DRAW);
+
+    pglBindBuffer(GL_ARRAY_BUFFER, g_gridPosVBO);
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glVertexPointer(2, GL_FLOAT, 0, (void*)0);
+
+    pglBindBuffer(GL_ARRAY_BUFFER, g_gridColVBO);
+    glEnableClientState(GL_COLOR_ARRAY);
+    glColorPointer(3, GL_FLOAT, 0, (void*)0);
+
+    glDrawArrays(GL_QUADS, 0, g_gridNumVerts);
+
+    glDisableClientState(GL_COLOR_ARRAY);
+    glDisableClientState(GL_VERTEX_ARRAY);
+    pglBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
 static void drawParticles(FlipFluidCuda& f, int viewportH) {
