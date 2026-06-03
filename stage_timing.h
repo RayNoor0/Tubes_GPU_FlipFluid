@@ -64,13 +64,24 @@ inline void stageReportEvery(StageStats& st, int N, const char* tag) {
                 "(numPressureIters=%d) ===\n",
                 tag, st.frames, st.lastPressureIters);
     for (int s = 0; s < STAGE_COUNT; ++s) {
+        // T9a..T9f are printed indented directly below T9_render
+        if (s >= T9a_clear && s <= T9f_swap) continue;
+
         double avg = st.sumMs[s] * inv;
         if (s == T_total) {
-            std::printf("  %-13s %8.3f ms   (%6.1f FPS)\n",
+            std::printf("  %-15s %8.3f ms   (%6.1f FPS)\n",
                         stageName(s), avg, avg > 0.0 ? 1000.0 / avg : 0.0);
         } else {
             double pct = (total > 0.0) ? (avg / total * 100.0) : 0.0;
-            std::printf("  %-13s %8.3f ms   %5.1f%%\n", stageName(s), avg, pct);
+            std::printf("  %-15s %8.3f ms   %5.1f%%\n", stageName(s), avg, pct);
+        }
+
+        if (s == T9_render) {
+            for (int ss = T9a_clear; ss <= T9f_swap; ++ss) {
+                double savg = st.sumMs[ss] * inv;
+                double spct = (total > 0.0) ? (savg / total * 100.0) : 0.0;
+                std::printf("    %-13s %8.3f ms   %5.1f%%\n", stageName(ss), savg, spct);
+            }
         }
     }
     std::fflush(stdout);

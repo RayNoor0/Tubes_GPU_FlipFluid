@@ -397,17 +397,37 @@ static void runBenchmark(AppWindow& w) {
                        scene.obstacleX, scene.obstacleY, scene.obstacleRadius,
                        scene.obstacleVelX, scene.obstacleVelY, scene.numSubSteps);
             auto tr = now();
+
+            auto tb_a0 = tr;
             glClear(GL_COLOR_BUFFER_BIT);
             setProjection(w.width, w.height);
-            if (scene.showGrid)      drawGrid(f);
+            auto tb_a1 = now();
+
+            auto tb_b0 = tb_a1;
+            if (scene.showGrid) drawGrid(f);
+            auto tb_b1 = now();
+
+            auto tb_c0 = tb_b1;
             if (scene.showParticles) drawParticles(f, w.height);
-            if (scene.showObstacle)  drawObstacle(f, scene.obstacleX, scene.obstacleY,
-                                                  scene.obstacleRadius);
+            auto tb_c1 = now();
+
+            auto tb_d0 = tb_c1;
+            if (scene.showObstacle) drawObstacle(f, scene.obstacleX, scene.obstacleY,
+                                                 scene.obstacleRadius);
+            auto tb_d1 = now();
+
+            // no UI overlay in benchmark (T9e_ui stays 0)
+            auto tb_f0 = tb_d1;
             glXSwapBuffers(w.dpy, w.xwin);
             auto te = now();
 
-            fliptiming::stageAdd(f.timing, fliptiming::T9_render, ms(tr, te));
-            fliptiming::stageAdd(f.timing, fliptiming::T_total,   ms(t0, te));
+            fliptiming::stageAdd(f.timing, fliptiming::T9_render,    ms(tr, te));
+            fliptiming::stageAdd(f.timing, fliptiming::T9a_clear,    ms(tb_a0, tb_a1));
+            fliptiming::stageAdd(f.timing, fliptiming::T9b_grid,     ms(tb_b0, tb_b1));
+            fliptiming::stageAdd(f.timing, fliptiming::T9c_particles, ms(tb_c0, tb_c1));
+            fliptiming::stageAdd(f.timing, fliptiming::T9d_obstacle,  ms(tb_d0, tb_d1));
+            fliptiming::stageAdd(f.timing, fliptiming::T9f_swap,     ms(tb_f0, te));
+            fliptiming::stageAdd(f.timing, fliptiming::T_total,      ms(t0, te));
             if (frame == WARMUP - 1)
                 for (int s = 0; s < fliptiming::STAGE_COUNT; ++s) f.timing.sumMs[s] = 0.0;
         }
@@ -641,16 +661,33 @@ int main(int argc, char** argv) {
             scene.frameNr += 1;
         }
 
-        // ----- draw (T9_render) -----
+        // ----- draw (T9_render: sub-timed per function) -----
         auto renderStart = std::chrono::steady_clock::now();
+
+        // T9a: glClear + setProjection
+        auto t9a_s = renderStart;
         glClear(GL_COLOR_BUFFER_BIT);
         setProjection(w.width, w.height);
+        auto t9a_e = std::chrono::steady_clock::now();
 
-        if (scene.showGrid)      drawGrid(f);
+        // T9b: drawGrid
+        auto t9b_s = t9a_e;
+        if (scene.showGrid) drawGrid(f);
+        auto t9b_e = std::chrono::steady_clock::now();
+
+        // T9c: drawParticles
+        auto t9c_s = t9b_e;
         if (scene.showParticles) drawParticles(f, w.height);
-        if (scene.showObstacle)  drawObstacle(f, scene.obstacleX, scene.obstacleY,
-                                              scene.obstacleRadius);
+        auto t9c_e = std::chrono::steady_clock::now();
 
+        // T9d: drawObstacle
+        auto t9d_s = t9c_e;
+        if (scene.showObstacle) drawObstacle(f, scene.obstacleX, scene.obstacleY,
+                                             scene.obstacleRadius);
+        auto t9d_e = std::chrono::steady_clock::now();
+
+        // T9e: UI overlay
+        auto t9e_s = t9d_e;
         flipcpu_ui::setProjectionToPixels(w.width, w.height);
         flipcpu_ui::Input uin;
         uin.screenW = w.width; uin.screenH = w.height;
@@ -680,19 +717,29 @@ int main(int argc, char** argv) {
         if (flipcpu_ui::button("Reset")) setupScene();
         flipcpu_ui::endPanel();
         flipcpu_ui::restoreProjection();
+        auto t9e_e = std::chrono::steady_clock::now();
 
+        // T9f: glXSwapBuffers
+        auto t9f_s = t9e_e;
         glXSwapBuffers(w.dpy, w.xwin);
+        auto t9f_e = std::chrono::steady_clock::now();
 
-        // ----- timing: T9_render, T_total, 60-frame report -----
-        auto frameEnd = std::chrono::steady_clock::now();
+        // ----- timing: T9 sub-stages, T9_render total, T_total, 60-frame report -----
+        auto frameEnd = t9f_e;
         auto msSince = [](std::chrono::steady_clock::time_point a,
                           std::chrono::steady_clock::time_point b) {
             return std::chrono::duration<double, std::milli>(b - a).count();
         };
         // Re-fetch: setupScene() above (res change / Reset) may have replaced fluid.
         FlipFluidCuda& ft = *scene.fluid;
-        fliptiming::stageAdd(ft.timing, fliptiming::T9_render, msSince(renderStart, frameEnd));
-        fliptiming::stageAdd(ft.timing, fliptiming::T_total,   msSince(frameStart, frameEnd));
+        fliptiming::stageAdd(ft.timing, fliptiming::T9_render,     msSince(renderStart, frameEnd));
+        fliptiming::stageAdd(ft.timing, fliptiming::T9a_clear,     msSince(t9a_s, t9a_e));
+        fliptiming::stageAdd(ft.timing, fliptiming::T9b_grid,      msSince(t9b_s, t9b_e));
+        fliptiming::stageAdd(ft.timing, fliptiming::T9c_particles,  msSince(t9c_s, t9c_e));
+        fliptiming::stageAdd(ft.timing, fliptiming::T9d_obstacle,   msSince(t9d_s, t9d_e));
+        fliptiming::stageAdd(ft.timing, fliptiming::T9e_ui,         msSince(t9e_s, t9e_e));
+        fliptiming::stageAdd(ft.timing, fliptiming::T9f_swap,       msSince(t9f_s, t9f_e));
+        fliptiming::stageAdd(ft.timing, fliptiming::T_total,        msSince(frameStart, frameEnd));
         fliptiming::stageReportEvery(ft.timing, 60, "CUDA");
 
         fpsFrames += 1;
